@@ -3,13 +3,12 @@ from dataclasses import dataclass
 from esphome import pins
 import esphome.codegen as cg
 from esphome.components import libretiny, light
+from esphome.components.const import CONF_CHANNEL_COLORS
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CHIPSET,
-    CONF_IS_RGBW,
     CONF_MAX_REFRESH_RATE,
     CONF_NUM_LEDS,
-    CONF_RGB_ORDER,
     CONF_PIN,
     CONF_OUTPUT_ID
 )
@@ -21,18 +20,6 @@ ameba_spi_led_strip_ns = cg.esphome_ns.namespace("ameba_spi_led_strip")
 AmebaSPILEDStripLightOutput = ameba_spi_led_strip_ns.class_(
     "AmebaSPILEDStripLightOutput", light.AddressableLight
 )
-
-RGBOrder = ameba_spi_led_strip_ns.enum("RGBOrder")
-
-RGB_ORDERS = {
-    "RGB": RGBOrder.ORDER_RGB,
-    "RBG": RGBOrder.ORDER_RBG,
-    "GRB": RGBOrder.ORDER_GRB,
-    "GBR": RGBOrder.ORDER_GBR,
-    "BGR": RGBOrder.ORDER_BGR,
-    "BRG": RGBOrder.ORDER_BRG,
-}
-
 
 @dataclass
 class LEDStripTimings:
@@ -51,7 +38,6 @@ CHIPSETS = {
 }
 
 
-CONF_IS_WRGB = "is_wrgb"
 CONF_DUMMY_MISO_PIN = "dummy_miso"
 CONF_DUMMY_SCLK_PIN = "dummy_sclk"
 CONF_DUMMY_CS_PIN = "dummy_cs"
@@ -100,9 +86,8 @@ def _validate_CS(value):
 
 
 def _validate_num_leds(value):
-    max_num_leds = 165  # 170
-    if value[CONF_IS_RGBW] or value[CONF_IS_WRGB]:
-        max_num_leds = 123  # 127
+    # A white channel makes each LED one byte wider, so fewer of them fit in the DMA buffer.
+    max_num_leds = 123 if "W" in value[CONF_CHANNEL_COLORS] else 165  # 127 / 170
     if value[CONF_NUM_LEDS] > max_num_leds:
         raise cv.Invalid(
             f"The maximum number of LEDs for this configuration is {max_num_leds}.",
@@ -128,11 +113,9 @@ CONFIG_SCHEMA = cv.All(
                 pins.internal_gpio_output_pin_number, _validate_CS
             ),
             cv.Required(CONF_NUM_LEDS): cv.positive_not_null_int,
-            cv.Required(CONF_RGB_ORDER): cv.enum(RGB_ORDERS, upper=True),
+            cv.Optional(CONF_CHANNEL_COLORS): light.validate_channel_colors,
             cv.Optional(CONF_MAX_REFRESH_RATE): cv.positive_time_period_microseconds,
             cv.Required(CONF_CHIPSET): cv.one_of(*CHIPSETS, upper=True),
-            cv.Optional(CONF_IS_RGBW, default=False): cv.boolean,
-            cv.Optional(CONF_IS_WRGB, default=False): cv.boolean,
         }
     ),
     _validate_num_leds,
@@ -159,6 +142,18 @@ async def to_code(config):
         )
     )
 
-    cg.add(var.set_rgb_order(config[CONF_RGB_ORDER]))
-    cg.add(var.set_is_rgbw(config[CONF_IS_RGBW]))
-    cg.add(var.set_is_wrgb(config[CONF_IS_WRGB]))
+    cg.add(var.set_channel_colors(light.channel_colors_struct(config[CONF_CHANNEL_COLORS])))
+
+    num_leds = config[CONF_NUM_LEDS]
+    channel_colors = config[CONF_CHANNEL_COLORS]
+    led_data = light.static_led_buffer(
+        config[CONF_OUTPUT_ID], num_leds, len(channel_colors)
+    )
+    dma_buf = cg.static_buffer(
+        config[CONF_OUTPUT_ID],
+        cg.uint8,
+        ameba_spi_led_strip_ns.dma_buffer_bytes(num_leds * len(channel_colors)),
+        align=4,
+    )
+    cg.add(var.set_buffers(led_data, dma_buf))
+
